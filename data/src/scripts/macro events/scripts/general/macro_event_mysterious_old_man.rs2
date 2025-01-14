@@ -40,8 +40,8 @@ if (finduid(%npc_macro_event_target) = true) {
 [queue,mysterious_old_man_fail]
 if (npc_finduid(%macro_event_uid) = true) {
     // https://youtu.be/Ai89wqupYqA?t=45
-    ~macro_event_fail_teleport;
-    ~macro_event_fail_note_inv; // not sure if this existed but Sudden and a couple others remember it being a thing
+    //~macro_event_fail_teleport;
+    //~macro_event_fail_note_inv; // not sure if this existed but Sudden and a couple others remember it being a thing
 }
 
 [ai_queue5,macro_event_mysterious_old_man_general] // despawn
