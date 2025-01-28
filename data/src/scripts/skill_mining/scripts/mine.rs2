@@ -28,7 +28,8 @@ if ($data = null) {
     ~displaymessage(^dm_default);
     return;
 }
-if (inv_freespace(inv) < 1) {
+def_obj $pickaxe = ~pickaxe_checker;
+if (inv_freespace(inv) < 1 & compare(oc_name($pickaxe), "League pickaxe") > 0) {
     anim(null, 0);
     ~mesbox("Your inventory is too full to hold any more <db_getfield($data, mining_table:ore_name, 0)>.");
     return;
@@ -44,7 +45,7 @@ if (afk_event = ^true & loc_category ! mining_rock_macro_gas) {
     if (loc_param(macro_gas) = null) jump(macro_randomminingrune);
     jump(macro_randommining);
 }
-def_obj $pickaxe = ~pickaxe_checker;
+
 if ($pickaxe = null) {
     anim(null, 0);
     ~mesbox("You need a pickaxe to mine this rock. You do not have a pickaxe which you have the Mining level to use.");
@@ -74,7 +75,8 @@ if ($data = null) {
     ~displaymessage(^dm_default);
     return;
 }
-if (inv_freespace(inv) < 1) {
+def_obj $pickaxe = ~pickaxe_checker;
+if (inv_freespace(inv) < 1 & compare(oc_name($pickaxe), "League pickaxe") > 0) {
     anim(null, 0);
     ~mesbox("Your inventory is too full to hold any more <db_getfield($data, mining_table:ore_name, 0)>.");
     return;
@@ -85,7 +87,7 @@ if (stat(mining) < $levelreq) {
     ~mesbox("You need a mining level of <tostring($levelreq)> to mine this rock.");
     return;
 }
-def_obj $pickaxe = ~pickaxe_checker;
+
 if ($pickaxe = null) {
     anim(null, 0);
     ~mesbox("You need a pickaxe to mine this rock. You do not have a pickaxe which you have the Mining level to use.");
@@ -134,9 +136,6 @@ if (random($chance) = ^true) {
 } else if (stat_random(stat(mining), db_getfield($data, mining_table:rock_successchance, 0)) = true) {
     // normal mining has a 1t delay, osrs used to be this way but changed it in like 
     p_delay(0);
-    // deplete
-    def_int $respawn = ~scale_by_playercount(db_getfield($data, mining_table:rock_respawnrate, 0));
-    loc_change(loc_param(next_loc_stage_mining), $respawn);
     // stop mining, give ore and xp. Sudden says its sound_230
     sound_synth(sound_230, 0, 0);
     anim(null, 0);
@@ -146,9 +145,20 @@ if (random($chance) = ^true) {
     if(inzone(^crest_perfect_mine_lower_bound, ^crest_perfect_mine_upper_bound, coord) = true) {
         $output = perfect_gold_ore;
     }
-    inv_add(inv, $output, 1);
     stat_advance(mining, db_getfield($data, mining_table:rock_exp, 0));
-    mes("You manage to mine some <db_getfield($data, mining_table:ore_name, 0)>.");
+    def_obj $pickaxe = ~pickaxe_checker;
+    if (compare(oc_name($pickaxe), "League pickaxe") = 0) {
+        mes("The <db_getfield($data, mining_table:ore_name, 0)> is sent to your bank.");
+        inv_add(bank, $output, 1);
+        p_delay(0);
+        @mining_firstswing(get_ore_normal);
+    } else {
+        // deplete
+        def_int $respawn = ~scale_by_playercount(db_getfield($data, mining_table:rock_respawnrate, 0));
+        loc_change(loc_param(next_loc_stage_mining), $respawn);
+        mes("You manage to mine some <db_getfield($data, mining_table:ore_name, 0)>.");
+        inv_add(inv, $output, 1);
+    }
     return;
 }
 ~mining_sound;
