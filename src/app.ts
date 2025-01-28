@@ -13,6 +13,7 @@ import Environment from '#/util/Environment.js';
 import { printError, printInfo } from '#/util/Logger.js';
 import { updateCompiler } from '#/util/RuneScriptCompiler.js';
 import { collectDefaultMetrics, register } from 'prom-client';
+import { createWorker } from '#/util/WorkerFactory.js';
 
 if (Environment.BUILD_STARTUP_UPDATE) {
     await updateCompiler();
@@ -33,7 +34,11 @@ if (!fs.existsSync('data/pack/client/config') || !fs.existsSync('data/pack/serve
     }
 }
 
-fs.mkdirSync('data/players', { recursive: true });
+if (Environment.EASY_STARTUP) {
+    createWorker('./login.ts');
+    createWorker('./friend.ts');
+    createWorker('./logger.ts');
+}
 
 await World.start();
 
@@ -59,10 +64,14 @@ function safeExit() {
 
     exiting = true;
 
-    if (Environment.NODE_PRODUCTION) {
-        World.rebootTimer(Environment.NODE_KILLTIMER as number);
-    } else {
-        World.rebootTimer(0);
+    try {
+        if (!Environment.EASY_STARTUP && !Environment.NODE_DEBUG) {
+            World.rebootTimer(Environment.NODE_KILLTIMER as number);
+        } else {
+            World.rebootTimer(0);
+        }
+    } catch (err) {
+        console.error(err);
     }
 }
 

@@ -80,6 +80,7 @@ import { PlayerLoading } from '#/engine/entity/PlayerLoading.js';
 import ScriptPointer from '#/engine/script/ScriptPointer.js';
 import Isaac from '#/io/Isaac.js';
 import LoggerEventType from '#/server/logger/LoggerEventType.js';
+import MoveSpeed from '#/engine/entity/MoveSpeed.js';
 
 const priv = forge.pki.privateKeyFromPem(
     Environment.STANDALONE_BUNDLE ?
@@ -103,7 +104,7 @@ class World {
     private static readonly PLAYER_SAVERATE: number = 1500; // 15m
     private static readonly PLAYER_COORDLOGRATE: number = 50; // 30s
 
-    private static readonly TIMEOUT_SOCKET_IDLE: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 16; // ~10s with no data- disconnect client
+    private static readonly TIMEOUT_SOCKET_IDLE: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 50; // 30s with no data- disconnect client
     private static readonly TIMEOUT_SOCKET_LOGOUT: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 100; // 60s with no client- remove player from processing
 
     // the game/zones map
@@ -133,7 +134,7 @@ class World {
 
     tickRate: number = World.TICKRATE; // speeds up when we're processing server shutdown
     currentTick: number = 0; // the current tick of the game world.
-    nextTick: number = Date.now() + World.TICKRATE; // the next time the game world should tick.
+    nextTick: number = 0; // the next time the game world should tick.
     shutdownTick: number = -1;
     pmCount: number = 1; // can't be 0 as clients will ignore the pm, their array is filled with 0 as default
 
@@ -157,25 +158,41 @@ class World {
         if (Environment.STANDALONE_BUNDLE) {
             if (this.loginThread instanceof Worker) {
                 this.loginThread.onmessage = msg => {
-                    this.onLoginMessage(msg.data);
+                    try {
+                        this.onLoginMessage(msg.data);
+                    } catch (err) {
+                        console.error(err);
+                    }
                 };
             }
 
             if (this.friendThread instanceof Worker) {
                 this.friendThread.onmessage = msg => {
-                    this.onFriendMessage(msg.data);
+                    try {
+                        this.onFriendMessage(msg.data);
+                    } catch (err) {
+                        console.error(err);
+                    }
                 };
             }
         } else {
             if (this.loginThread instanceof NodeWorker) {
                 this.loginThread.on('message', msg => {
-                    this.onLoginMessage(msg);
+                    try {
+                        this.onLoginMessage(msg);
+                    } catch (err) {
+                        console.error(err);
+                    }
                 });
             }
 
             if (this.friendThread instanceof NodeWorker) {
                 this.friendThread.on('message', msg => {
-                    this.onFriendMessage(msg);
+                    try {
+                        this.onFriendMessage(msg);
+                    } catch (err) {
+                        console.error(err);
+                    }
                 });
             }
         }
@@ -356,6 +373,7 @@ class World {
         }
 
         if (startCycle) {
+            this.nextTick = Date.now() + World.TICKRATE;
             this.cycle();
         }
     }
@@ -859,8 +877,16 @@ class World {
                         other.client.send(Uint8Array.from([ 15 ]));
                     }
 
-                    // todo: ensure the player has the latest scene and doesn't have their position offset
-                    // note- rebuildnormal is not guaranteed to re-run
+                    // force resyncing
+                    // reload entity info (overkill? does the client have some logic around this?)
+                    other.buildArea.players.clear();
+                    other.buildArea.npcs.clear();
+                    // rebuild scene (rebuildnormal won't run if you're in the same zone!)
+                    other.originX = -1;
+                    other.originZ = -1;
+                    other.moveSpeed = MoveSpeed.INSTANT;
+                    other.tele = true;
+                    other.jump = true;
 
                     continue player;
                 }
@@ -965,6 +991,7 @@ class World {
         // TODO: benchmark this?
         for (const player of this.players) {
             player.convertMovementDir();
+            player.reorient();
 
             const grid = this.playerGrid;
             const coord = CoordGrid.packCoord(player.level, player.x, player.z);
@@ -979,6 +1006,7 @@ class World {
 
         for (const npc of this.npcs) {
             npc.convertMovementDir();
+            npc.reorient();
             this.npcRenderer.computeInfo(npc);
         }
     }
@@ -1228,12 +1256,12 @@ class World {
         return this.gameMap.getZone(x, z, level).getLoc(x, z, locId);
     }
 
-    getObj(x: number, z: number, level: number, objId: number, receiverId: number): Obj | null {
-        return this.gameMap.getZone(x, z, level).getObj(x, z, objId, receiverId);
+    getObj(x: number, z: number, level: number, objId: number, receiver64: bigint): Obj | null {
+        return this.gameMap.getZone(x, z, level).getObj(x, z, objId, receiver64);
     }
 
-    getObjOfReceiver(x: number, z: number, level: number, objId: number, receiverId: number): Obj | null {
-        return this.gameMap.getZone(x, z, level).getObjOfReceiver(x, z, objId, receiverId);
+    getObjOfReceiver(x: number, z: number, level: number, objId: number, receiver64: bigint): Obj | null {
+        return this.gameMap.getZone(x, z, level).getObjOfReceiver(x, z, objId, receiver64);
     }
 
     trackZone(tick: number, zone: Zone): void {
@@ -1286,29 +1314,30 @@ class World {
         this.trackZone(this.currentTick, zone);
     }
 
-    addObj(obj: Obj, receiverId: number, duration: number): void {
+    addObj(obj: Obj, receiver64: bigint, duration: number): void {
         // printDebug(`[World] addObj => name: ${ObjType.get(obj.type).name}, receiverId: ${receiverId}, duration: ${duration}`);
-        const objType: ObjType = ObjType.get(obj.type);
         // check if we need to changeobj first.
-        const existing = this.getObjOfReceiver(obj.x, obj.z, obj.level, obj.type, receiverId);
-        if (existing && existing.lifecycle === EntityLifeCycle.DESPAWN && obj.lifecycle === EntityLifeCycle.DESPAWN) {
-            const nextCount = obj.count + existing.count;
-            if (objType.stackable && nextCount <= Inventory.STACK_LIMIT) {
-                // if an obj of the same type exists and is stackable and have the same receiver, then we merge them.
-                this.changeObj(existing, receiverId, nextCount);
-                return;
+        if (ObjType.get(obj.type).stackable && obj.lifecycle === EntityLifeCycle.DESPAWN) {
+            const existing = this.getObjOfReceiver(obj.x, obj.z, obj.level, obj.type, receiver64);
+            if (existing && existing.lifecycle === EntityLifeCycle.DESPAWN) {
+                const nextCount = obj.count + existing.count;
+                if (nextCount <= Inventory.STACK_LIMIT) {
+                    // if an obj of the same type exists and is stackable and have the same receiver, then we merge them.
+                    this.changeObj(existing, receiver64, nextCount);
+                    return;
+                }
             }
         }
         const zone: Zone = this.gameMap.getZone(obj.x, obj.z, obj.level);
-        zone.addObj(obj, receiverId);
-        if (receiverId !== -1) {
+        zone.addObj(obj, receiver64);
+        if (receiver64 !== Obj.NO_RECEIVER) {
             // objs with a receiver always attempt to reveal 100 ticks after being dropped.
             // items that can't be revealed (untradable, members obj in f2p) will be skipped in revealObj
             const reveal: number = this.currentTick + Obj.REVEAL;
             obj.setLifeCycle(reveal);
             this.trackZone(reveal, zone);
             this.trackZone(this.currentTick, zone);
-            obj.receiverId = receiverId;
+            obj.receiver64 = receiver64;
             obj.reveal = duration;
         } else {
             obj.setLifeCycle(this.currentTick + duration);
@@ -1322,7 +1351,7 @@ class World {
         const duration: number = obj.reveal;
         const change: number = obj.lastChange;
         const zone: Zone = this.gameMap.getZone(obj.x, obj.z, obj.level);
-        zone.revealObj(obj, obj.receiverId);
+        zone.revealObj(obj, obj.receiver64);
         // objs next life cycle always starts from the last time they changed + the inputted duration.
         // accounting for reveal time here.
         const nextLifecycle: number = (change !== -1 ? (Obj.REVEAL - (this.currentTick - change)) : 0) + this.currentTick + duration;
@@ -1331,10 +1360,10 @@ class World {
         this.trackZone(this.currentTick, zone);
     }
 
-    changeObj(obj: Obj, receiverId: number, newCount: number): void {
+    changeObj(obj: Obj, receiver64: bigint, newCount: number): void {
         // printDebug(`[World] changeObj => name: ${ObjType.get(obj.type).name}, receiverId: ${receiverId}, newCount: ${newCount}`);
         const zone: Zone = this.gameMap.getZone(obj.x, obj.z, obj.level);
-        zone.changeObj(obj, receiverId, obj.count, newCount);
+        zone.changeObj(obj, receiver64, obj.count, newCount);
         this.trackZone(this.currentTick, zone);
     }
 
@@ -1511,6 +1540,15 @@ class World {
         return undefined;
     }
 
+    getPlayerByHash64(hash64: bigint): Player | undefined {
+        for (const player of this.players) {
+            if (player.hash64 === hash64) {
+                return player;
+            }
+        }
+        return undefined;
+    }
+
     getTotalPlayers(): number {
         return this.players.count;
     }
@@ -1562,33 +1600,41 @@ class World {
 
         if (this.devThread instanceof NodeWorker) {
             this.devThread.on('message', msg => {
-                if (msg.type === 'dev_reload') {
-                    this.reload();
-                } else if (msg.type === 'dev_failure') {
-                    if (msg.error) {
-                        console.error(msg.error);
+                try {
+                    if (msg.type === 'dev_reload') {
+                        this.reload();
+                    } else if (msg.type === 'dev_failure') {
+                        if (msg.error) {
+                            console.error(msg.error);
 
-                        this.broadcastMes(msg.error.replaceAll('data/src/scripts/', ''));
-                        this.broadcastMes('Check the console for more information.');
-                    }
-                } else if (msg.type === 'dev_progress') {
-                    if (msg.broadcast) {
-                        console.log(msg.broadcast);
+                            this.broadcastMes(msg.error.replaceAll('data/src/scripts/', ''));
+                            this.broadcastMes('Check the console for more information.');
+                        }
+                    } else if (msg.type === 'dev_progress') {
+                        if (msg.broadcast) {
+                            console.log(msg.broadcast);
 
-                        this.broadcastMes(msg.broadcast);
-                    } else if (msg.text) {
-                        console.log(msg.text);
+                            this.broadcastMes(msg.broadcast);
+                        } else if (msg.text) {
+                            console.log(msg.text);
+                        }
                     }
+                } catch (err) {
+                    console.error(err);
                 }
             });
 
             // todo: catch all cases where it might exit instead of throwing an error, so we aren't
             // re-initializing the file watchers after errors
             this.devThread.on('exit', () => {
-                // todo: remove this mes after above the todo above is addressed
-                this.broadcastMes('Error while rebuilding - see console for more info.');
+                try {
+                    // todo: remove this mes after above the todo above is addressed
+                    this.broadcastMes('Error while rebuilding - see console for more info.');
 
-                this.createDevThread();
+                    this.createDevThread();
+                } catch (err) {
+                    console.error(err);
+                }
             });
         }
     }
@@ -1661,14 +1707,31 @@ class World {
                 save = msg.save;
             }
 
-            const player = PlayerLoading.load(username, new Packet(save), client);
-            player.reconnecting = reconnecting;
-            player.staffModLevel = staffmodlevel;
-            player.lowMemory = lowMemory;
-            player.muted_until = muted_until ? new Date(muted_until) : null;
+            try {
+                const player = PlayerLoading.load(username, new Packet(save), client);
 
-            this.newPlayers.add(player);
-            client.state = 1;
+                player.reconnecting = reconnecting;
+                player.staffModLevel = staffmodlevel;
+                player.lowMemory = lowMemory;
+                player.muted_until = muted_until ? new Date(muted_until) : null;
+
+                this.newPlayers.add(player);
+                client.state = 1;
+            } catch (err) {
+                if (err instanceof Error) {
+                    console.error(username, err.message);
+                }
+
+                // bad save :( the player won't be happy
+                client.send(Uint8Array.from([ 13 ]));
+                client.close();
+
+                // todo: maybe we can tell the login thread to swap for the last-good save?
+                this.loginThread.postMessage({
+                    type: 'player_force_logout',
+                    username: username
+                });
+            }
         } else if (type === 'player_logout') {
             const { username, success } = msg;
             if (!this.logoutRequests.has(username)) {
